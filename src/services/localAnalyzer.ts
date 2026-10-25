@@ -1,4 +1,4 @@
-import type { MeetingMeta, RawExtraction } from '../types';
+import type { MeetingMeta, RawExtraction, TaskLifecycleStatus } from '../types';
 
 interface SpeakerLine {
   speaker: string | null;
@@ -12,12 +12,57 @@ const ACTION_KEYWORDS =
   /\b(I'll|I will|will own|needs to|need to|should own|should take|action item|todo|to-do|can you|could you|has to|going to|can take|can own)\b/i;
 
 const NOISE_PATTERN =
-  /\b(not sure|unclear|let's figure that out|let's leave that|good question|we'll confirm)\b/i;
+  /\b(not sure|unclear|let's figure that out|let's leave that|good question|we'll confirm|we discussed|discussed the)\b/i;
 
 const DEADLINE_PATTERNS = [
   /\bby\s+([^,.!?;]+)/i,
   /\b(today|tomorrow|end of (?:day|week|month)|EOD|EOW|next (?:week|month|monday|tuesday|wednesday|thursday|friday|saturday|sunday)|this (?:week|month|monday|tuesday|wednesday|thursday|friday|saturday|sunday))\b/i,
 ];
+
+// Splits a sentence into independent clauses on strong contrastive conjunctions, so a sentence
+// describing two distinct things ("Testing is finished, but two bugs remain.") can yield two
+// separate tasks instead of being forced into one. Sentences without these conjunctions are
+// unaffected (the split simply returns the original sentence as a single clause).
+const CLAUSE_SPLIT_PATTERN = /\s*,?\s+\b(?:but|however|although|though)\b\s*/i;
+
+// Lifecycle classification — checked in this order: ONGOING, then explicit future/modal
+// obligation (forces PENDING even if a completion word like "done" appears), then DONE,
+// defaulting to PENDING when none match. "Nearly/almost finished" is ONGOING, not DONE.
+const ONGOING_PATTERNS = [
+  /\b(?:is|are)\s+(?:now|currently)\s+\w+ing\b/i,
+  /\b(?:is|are)\s+being\s+\w+ed\b/i,
+  /\b(?:nearly|almost|mostly|partially)\s+(?:finished|done|complete|completed)\b/i,
+  /\b(?:in progress|halfway through|ongoing|still\s+\w+ing)\b/i,
+];
+
+const MODAL_OBLIGATION_PATTERN =
+  /\b(?:must|should|needs?\s+to|has\s+to|have\s+to)\s+be\s+(?:finished|done|completed|complete)\b/i;
+
+const DONE_PATTERNS = [
+  /\b(?:is|are|has|have|was|were)\s+(?:already\s+)?(?:finished|done|completed|complete)\b/i,
+  /\b(?:completed|finished|submitted|wrapped up)\b/i,
+];
+
+// Catches future-commitment / outstanding-work phrasing that the other patterns miss, so
+// sentences like "Rahul will start tomorrow." or "Two bugs remain." are still recognized as
+// tasks (defaulting to pending) rather than silently dropped.
+const PENDING_TRIGGER_PATTERN = /\b(?:must|will|remain(?:s|ing)?)\b/i;
+
+function isTaskCandidate(clause: string): boolean {
+  return (
+    ACTION_KEYWORDS.test(clause) ||
+    DONE_PATTERNS.some((p) => p.test(clause)) ||
+    ONGOING_PATTERNS.some((p) => p.test(clause)) ||
+    PENDING_TRIGGER_PATTERN.test(clause)
+  );
+}
+
+function classifyLifecycleStatus(clause: string): TaskLifecycleStatus {
+  if (ONGOING_PATTERNS.some((p) => p.test(clause))) return 'ongoing';
+  if (MODAL_OBLIGATION_PATTERN.test(clause)) return 'pending';
+  if (DONE_PATTERNS.some((p) => p.test(clause))) return 'done';
+  return 'pending';
+}
 
 function parseMeta(lines: string[]): { meta: MeetingMeta; bodyStartIndex: number } {
   let title = 'Untitled Meeting';
@@ -78,9 +123,16 @@ function splitIntoSentences(text: string): string[] {
     .filter(Boolean);
 }
 
-function extractDeadline(sentence: string): string | null {
+function splitIntoClauses(sentence: string): string[] {
+  return sentence
+    .split(CLAUSE_SPLIT_PATTERN)
+    .map((c) => c.trim())
+    .filter(Boolean);
+}
+
+function extractDeadline(clause: string): string | null {
   for (const pattern of DEADLINE_PATTERNS) {
-    const match = sentence.match(pattern);
+    const match = clause.match(pattern);
     if (match) {
       return (match[1] ?? match[0]).trim().replace(/\s+/g, ' ');
     }
@@ -88,32 +140,40 @@ function extractDeadline(sentence: string): string | null {
   return null;
 }
 
-function extractOwner(sentence: string, speaker: string | null, knownNames: string[]): string | null {
-  const directAddress = sentence.match(/^([A-Z][a-zA-Z]+),\s*/);
+function extractOwner(clause: string, speaker: string | null, knownNames: string[]): string | null {
+  const directAddress = clause.match(/^([A-Z][a-zA-Z]+),\s*/);
   if (directAddress && knownNames.includes(directAddress[1])) {
     return directAddress[1];
   }
 
-  if (/\bI('ll| will)\b/i.test(sentence) && speaker) {
+  if (/\bI('ll| will)\b/i.test(clause) && speaker) {
     return speaker;
   }
 
-  const nameWill = sentence.match(
+  const nameWill = clause.match(
     /\b([A-Z][a-zA-Z]+)\s+(?:will|needs to|should|is going to|can take|can own)\b/
   );
   if (nameWill && knownNames.includes(nameWill[1])) {
     return nameWill[1];
   }
 
-  if (/\bcan take\b|\bcan own\b/i.test(sentence) && speaker) {
+  if (/\bcan take\b|\bcan own\b/i.test(clause) && speaker) {
     return speaker;
+  }
+
+  // Fallback: the clause's leading subject matches a known attendee. Covers third-person
+  // completion/progress statements the patterns above don't address, e.g. "Rahul completed
+  // the database integration." or "Priya is currently testing the API."
+  const leadingName = clause.match(/^([A-Z][a-zA-Z]+)\b/);
+  if (leadingName && knownNames.includes(leadingName[1])) {
+    return leadingName[1];
   }
 
   return null;
 }
 
-function cleanDescription(sentence: string): string {
-  return sentence
+function cleanDescription(clause: string): string {
+  return clause
     .replace(/^([A-Z][a-zA-Z]+),\s*/, '')
     .replace(/\?+$/, '.')
     .trim();
@@ -139,19 +199,20 @@ export function analyzeLocally(transcript: string): RawExtraction {
     for (const sentence of sentences) {
       if (NOISE_PATTERN.test(sentence)) continue;
 
-      const isDecision = DECISION_KEYWORDS.test(sentence);
-      const isAction = ACTION_KEYWORDS.test(sentence);
-
-      if (isDecision) {
+      if (DECISION_KEYWORDS.test(sentence)) {
         decisions.push(sentence.replace(/^(great,?|correct,?|alright,?)\s*/i, '').trim());
       }
 
-      if (isAction) {
-        const owner = extractOwner(sentence, speaker, knownNames);
-        const deadline = extractDeadline(sentence);
-        const description = cleanDescription(sentence);
+      for (const clause of splitIntoClauses(sentence)) {
+        if (NOISE_PATTERN.test(clause)) continue;
+        if (!isTaskCandidate(clause)) continue;
+
+        const owner = extractOwner(clause, speaker, knownNames);
+        const deadline = extractDeadline(clause);
+        const description = cleanDescription(clause);
+        const status = classifyLifecycleStatus(clause);
         if (description.length > 3) {
-          tasks.push({ description, owner, deadline });
+          tasks.push({ description, owner, deadline, status });
         }
       }
     }

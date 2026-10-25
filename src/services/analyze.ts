@@ -1,10 +1,11 @@
 import type {
-  AmbiguousReason,
   AppSettings,
+  ClarificationReason,
   ExtractedTask,
   FollowUpQuestion,
   MeetingAnalysis,
   RawExtraction,
+  TaskLifecycleStatus,
 } from '../types';
 import { analyzeLocally, extractAttendees, extractMeta } from './localAnalyzer';
 import { analyzeWithOpenAI } from './openaiProvider';
@@ -16,11 +17,18 @@ function nextId(prefix: string): string {
   return `${prefix}-${Date.now()}-${idCounter}`;
 }
 
-function computeReasons(owner: string | null, deadline: string | null): AmbiguousReason[] {
-  const reasons: AmbiguousReason[] = [];
+function computeClarificationReasons(owner: string | null, deadline: string | null): ClarificationReason[] {
+  const reasons: ClarificationReason[] = [];
   if (!owner) reasons.push('missing-owner');
   if (!deadline) reasons.push('missing-deadline');
   return reasons;
+}
+
+const VALID_STATUSES: TaskLifecycleStatus[] = ['done', 'ongoing', 'pending'];
+function normalizeStatus(status: unknown): TaskLifecycleStatus {
+  return typeof status === 'string' && VALID_STATUSES.includes(status as TaskLifecycleStatus)
+    ? (status as TaskLifecycleStatus)
+    : 'pending';
 }
 
 function buildTasksAndFollowUps(
@@ -47,18 +55,19 @@ function buildTasksAndFollowUps(
       if (result.ok) deadline = result.value;
     }
 
-    const reasons = computeReasons(owner, deadline);
+    const clarificationReasons = computeClarificationReasons(owner, deadline);
     const taskId = nextId('task');
     tasks.push({
       id: taskId,
       description: t.description,
       owner,
       deadline,
-      status: reasons.length ? 'ambiguous' : 'complete',
-      ambiguousReasons: reasons,
+      status: normalizeStatus(t.status),
+      needsClarification: clarificationReasons.length > 0,
+      clarificationReasons,
     });
 
-    if (reasons.includes('missing-owner')) {
+    if (clarificationReasons.includes('missing-owner')) {
       followUps.push({
         id: nextId('fu'),
         taskId,
@@ -68,7 +77,7 @@ function buildTasksAndFollowUps(
         answered: false,
       });
     }
-    if (reasons.includes('missing-deadline')) {
+    if (clarificationReasons.includes('missing-deadline')) {
       followUps.push({
         id: nextId('fu'),
         taskId,
@@ -136,9 +145,12 @@ export interface MutationResult {
 
 /**
  * Validates `answer` against the follow-up's expected type (owner or deadline) before touching
- * any state. On failure, returns the original analysis unchanged plus an error message; on
- * success, the task's completion status is still derived solely from whether BOTH owner and
- * deadline are now present — answering one question never marks a task complete by itself.
+ * any state. On failure, returns the original analysis unchanged plus an error message.
+ *
+ * Resolving an owner or deadline only updates `needsClarification`/`clarificationReasons` — the
+ * task's lifecycle `status` (done/ongoing/pending) is never touched here. Clarification is about
+ * missing information, not evidence that the underlying work changed state, so answering a
+ * question never marks a task done, ongoing, or any other status by itself.
  */
 export function applyFollowUpAnswer(
   analysis: MeetingAnalysis,
@@ -171,9 +183,9 @@ export function applyFollowUpAnswer(
   const tasks = analysis.tasks.map((task) => {
     if (task.id !== followUp.taskId) return task;
     const updated: ExtractedTask = { ...task, [followUp.field]: result.value };
-    const reasons = computeReasons(updated.owner, updated.deadline);
-    updated.ambiguousReasons = reasons;
-    updated.status = reasons.length ? 'ambiguous' : 'complete';
+    const clarificationReasons = computeClarificationReasons(updated.owner, updated.deadline);
+    updated.clarificationReasons = clarificationReasons;
+    updated.needsClarification = clarificationReasons.length > 0;
     return updated;
   });
 
@@ -186,7 +198,8 @@ export function applyFollowUpAnswer(
 /**
  * Direct table edits go through the same validation as clarification answers. Clearing a field
  * back to empty is allowed without validation (it represents "still unknown", not a new claim).
- * An invalid value never touches the task or localStorage-backed state.
+ * An invalid value never touches the task or localStorage-backed state. As with clarification
+ * answers, editing owner/deadline never changes the task's lifecycle `status`.
  */
 export function updateTaskField(
   analysis: MeetingAnalysis,
@@ -200,9 +213,9 @@ export function updateTaskField(
     const tasks = analysis.tasks.map((task) => {
       if (task.id !== taskId) return task;
       const updated: ExtractedTask = { ...task, [field]: null };
-      const reasons = computeReasons(updated.owner, updated.deadline);
-      updated.ambiguousReasons = reasons;
-      updated.status = reasons.length ? 'ambiguous' : 'complete';
+      const clarificationReasons = computeClarificationReasons(updated.owner, updated.deadline);
+      updated.clarificationReasons = clarificationReasons;
+      updated.needsClarification = clarificationReasons.length > 0;
       return updated;
     });
     const followUps = analysis.followUps.map((fu) =>
@@ -227,9 +240,9 @@ export function updateTaskField(
   const tasks = analysis.tasks.map((task) => {
     if (task.id !== taskId) return task;
     const updated: ExtractedTask = { ...task, [field]: result.value };
-    const reasons = computeReasons(updated.owner, updated.deadline);
-    updated.ambiguousReasons = reasons;
-    updated.status = reasons.length ? 'ambiguous' : 'complete';
+    const clarificationReasons = computeClarificationReasons(updated.owner, updated.deadline);
+    updated.clarificationReasons = clarificationReasons;
+    updated.needsClarification = clarificationReasons.length > 0;
     return updated;
   });
 

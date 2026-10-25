@@ -70,8 +70,14 @@ function EditableCell({
   );
 }
 
+const STATUS_LABEL: Record<ExtractedTask['status'], string> = {
+  done: 'Done',
+  ongoing: 'Ongoing',
+  pending: 'Pending',
+};
+
 export default function TasksTable({ tasks, onUpdateField }: TasksTableProps) {
-  const openCount = tasks.filter((t) => t.status === 'ambiguous').length;
+  const openCount = tasks.filter((t) => t.needsClarification).length;
 
   return (
     <section className="tasks-section">
@@ -100,7 +106,7 @@ export default function TasksTable({ tasks, onUpdateField }: TasksTableProps) {
             </thead>
             <tbody>
               {tasks.map((task) => (
-                <tr key={task.id} className={task.status === 'ambiguous' ? 'row--ambiguous' : ''}>
+                <tr key={task.id} className={task.needsClarification ? 'row--ambiguous' : ''}>
                   <td className="task-desc-cell">{task.description}</td>
                   <td>
                     <EditableCell
@@ -117,17 +123,18 @@ export default function TasksTable({ tasks, onUpdateField }: TasksTableProps) {
                     />
                   </td>
                   <td>
-                    {task.status === 'complete' ? (
-                      <span className="status-pill status-pill--ok">
+                    <div className="status-pill-group">
+                      <span className={`status-pill status-pill--${task.status}`}>
                         <span className="status-pill__dot" />
-                        Complete
+                        {STATUS_LABEL[task.status]}
                       </span>
-                    ) : (
-                      <span className="status-pill status-pill--warn">
-                        <span className="status-pill__dot" />
-                        Needs clarification
-                      </span>
-                    )}
+                      {task.needsClarification && (
+                        <span className="status-pill status-pill--warn">
+                          <span className="status-pill__dot" />
+                          Needs info
+                        </span>
+                      )}
+                    </div>
                   </td>
                 </tr>
               ))}

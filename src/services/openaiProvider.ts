@@ -5,12 +5,20 @@ Extract ONLY information explicitly present in the transcript. Never invent, gue
 deadlines, or decisions that are not clearly stated. If a task has no clearly stated owner, set "owner"
 to null. If it has no clearly stated deadline, set "deadline" to null.
 
+For each task, classify its lifecycle "status" as one of:
+- "done": the transcript clearly states the task is already complete (e.g. "finished", "completed", "already submitted"). Never infer completion merely because a deadline has passed.
+- "ongoing": the transcript clearly indicates the task has started but is not yet complete (e.g. "currently working on", "in progress", "nearly finished").
+- "pending": the task has not started, is a future commitment ("will", "needs to"), or there isn't enough evidence of progress or completion. Use this when unsure.
+"status" is independent of whether the task is missing an owner or deadline — a "pending" or "ongoing" task does not need clarification just because it hasn't started, and a "done" task can still be missing an owner.
+A single statement that mentions multiple distinct pieces of work (e.g. "Testing is finished, but two bugs remain.") should become separate tasks with their own status, not one task.
+Do not create a task from a statement that merely discusses or mentions a topic without describing actual work, a commitment, progress, or completion.
+
 Respond with strict JSON only, matching this shape:
 {
   "summary": string,            // concise 2-4 sentence factual summary of the meeting
   "decisions": string[],        // key decisions explicitly made
   "tasks": [
-    { "description": string, "owner": string | null, "deadline": string | null }
+    { "description": string, "owner": string | null, "deadline": string | null, "status": "done" | "ongoing" | "pending" }
   ]
 }`;
 

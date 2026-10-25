@@ -54,8 +54,8 @@ export function exportAsText(analysis: MeetingAnalysis): void {
     analysis.tasks.forEach((t, i) => {
       const owner = t.owner ?? 'UNASSIGNED';
       const deadline = formatDeadlineDisplay(t.deadline) ?? 'NO DEADLINE';
-      const flag = t.status === 'ambiguous' ? '  [NEEDS CLARIFICATION]' : '';
-      lines.push(`${i + 1}. ${t.description}`);
+      const flag = t.needsClarification ? '  [NEEDS CLARIFICATION]' : '';
+      lines.push(`${i + 1}. [${t.status.toUpperCase()}] ${t.description}`);
       lines.push(`   Owner: ${owner} | Deadline: ${deadline}${flag}`);
     });
   }
